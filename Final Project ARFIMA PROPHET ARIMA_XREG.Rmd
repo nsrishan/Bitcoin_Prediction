@@ -1,0 +1,310 @@
+---
+title: "Final Project"
+author: "Niro Srishan"
+date: '2022-05-24'
+output:
+  word_document: default
+  html_document: default
+  pdf_document: default
+---
+
+```{r load-packages, include=FALSE}
+library(xts)
+library(dplyr)
+library(imputeTS)
+library(tidyr)
+library(Metrics)
+library(lubridate)
+library(readr)
+library(tseries)
+library(forecast)
+library(fGarch) 
+library(rugarch)
+library(readr)
+library(ggplot2)
+library(DataCombine)
+library(corrplot)
+library(prophet)
+library(tidyverse)
+library(readr)
+
+```
+
+## Loading Bitcoin data
+```{r message=FALSE, warning=FALSE, cache=TRUE}
+
+Bitcoin <- read_csv("Bitcoin.csv")
+
+adf.test(Bitcoin$Open)
+kpss.test(Bitcoin$Open)
+
+p <- ggplot(Bitcoin, aes(x=Date, y=Open)) +
+  geom_line() + 
+  xlab("")
+p
+
+```
+
+## Import Google Trend
+```{r message=FALSE, warning=FALSE, cache=TRUE}
+
+cleaned_Google_Trend <- read_csv("cleaned_Google_Trend.csv")
+
+cleaned_Google_Trend$Week = mdy(cleaned_Google_Trend$Week)
+
+GTtrend <- cleaned_Google_Trend
+
+p <- ggplot(GTtrend, aes(x=Week, y=Trend)) +
+  geom_line() + 
+  xlab("")
+p
+
+bit_length = length(Bitcoin)
+Bitcoin_adj <- tail(Bitcoin, (bit_length-965))
+
+Bitcoin_adj <- head(Bitcoin_adj, (nrow(Bitcoin_adj)-8))
+```
+## Load S&P 500 Data
+```{r message=FALSE, warning=FALSE, cache=TRUE}
+
+SP500 <- read_csv("SP500.csv")
+
+SP500$Date <- mdy(SP500$Date)
+
+SP500<-arrange(SP500,Date)
+row.names(SP500) <- NULL
+
+
+SP500_adj = tail(SP500, (nrow(SP500)-1275))
+
+
+p <- ggplot(SP500_adj, aes(x=Date, y=Open)) +
+  geom_line() + 
+  xlab("")
+p
+#SP500_adj = head(SP500_adj, 1257)
+
+SP500_adj$vpert <- (SP500_adj$High - SP500_adj$Low)/SP500_adj$Open
+SP500_adj <- SP500_adj[c(1,4,7)]
+
+View(SP500_adj)
+```
+
+##Merge columns together
+```{r message=FALSE, warning=FALSE, cache=TRUE}
+
+df_merge = merge(Bitcoin_adj, SP500_adj, by = 'Date', all.x=TRUE)
+
+View(df_merge)
+
+colnames(cleaned_Google_Trend)[1] <- "Date"
+
+colnames(df_merge)[2] <- "Bitcoin_Open_Price"
+colnames(df_merge)[8] <- "SP500_Open_Price"
+colnames(df_merge)[9] <- "SP500_DayChange"
+df_merge$Bitcoin_DayChange <- (df_merge$High-df_merge$Low)/df_merge$Bitcoin_Open_Price
+df_merge <- df_merge[-c(3:5,7)]
+
+df_mergefinal = merge(df_merge, cleaned_Google_Trend, by = 'Date', all.x=TRUE)
+
+View(df_mergefinal)
+
+
+df_mergefinal$SP500_Open_Price <- na_interpolation(df_mergefinal$SP500_Open_Price,option = "spline")
+
+df_mergefinal$SP500_DayChange <- na_interpolation(df_mergefinal$SP500_DayChange,option = "spline")
+
+p <- ggplot(df_mergefinal, aes(x=Date, y=Volume)) +
+  geom_line() + 
+  xlab("")
+p
+
+```
+
+##Slide data for Lags
+```{r message=FALSE, warning=FALSE, cache=TRUE}
+
+DataSlid1 <- slide(data = df_mergefinal, Var = 'Trend',
+                   NewVar = 'TrendLag', slideBy = -1)
+DataSlid1 <- slide(data = DataSlid1, Var = 'Volume',
+                   NewVar = 'VolLag', slideBy = -1)
+DataSlid1 <- slide(data = DataSlid1, Var = 'SP500_Open_Price',
+                   NewVar = 'SPOpenLag', slideBy = -1)
+DataSlid1 <- slide(data = DataSlid1, Var = 'SP500_DayChange',
+                   NewVar = 'SPDayChangeLag', slideBy = -1)
+DataSlid1 <- slide(data = DataSlid1, Var = 'Bitcoin_DayChange',
+                   NewVar = 'Bitcoin_DayChangeLag', slideBy = -1)
+
+
+Final_df <- DataSlid1[-c(3:7)]
+
+Final_df <- tail(Final_df,(nrow(Final_df)-6))
+
+View(Final_df)
+
+corrplot(cor(Final_df[-c(1)]),method = 'color')
+```
+
+
+```{r message=FALSE, warning=FALSE, cache=TRUE}
+
+train <-head(Final_df,1789)
+test <- head((tail(Final_df,31)),30)
+
+
+View(train)
+
+trend_arima <- auto.arima(train$TrendLag)
+vol_arima <- auto.arima(train$VolLag)
+SP_arima <- auto.arima(train$SPOpenLag)
+
+trend_forecast <- forecast(trend_arima, h=30)
+vol_forecast <- forecast(vol_arima, h=30)
+SP_forecast <- forecast(SP_arima, h=30)
+
+trend_forecast$mean
+
+fit <- auto.arima(train$Bitcoin_Open_Price, xreg = train$SPOpenLag)
+
+Bitcoin_lr_forecast <- forecast(fit, h=30, xreg = SP_forecast$mean)
+
+Bitcoin_xreg_smape <- smape(test$Bitcoin_Open_Price,Bitcoin_lr_forecast$mean)
+
+Bitcoin_xreg_rmse <-
+rmse(test$Bitcoin_Open_Price,Bitcoin_lr_forecast$mean)
+
+linear_predict <- data.table::as.data.table(Bitcoin_lr_forecast$mean, .keep.rownames = "BitcoinLinearPredict")
+
+linear_predict$Date <-seq(as.Date("2022/04/01"), by = "day", length.out = 30)
+
+linear_predictions = merge(test[c(1:2)],linear_predict, by = 'Date')
+
+View(linear_predictions)
+ggplot(linear_predictions , aes(x=Date)) + 
+  geom_line(aes(y = x), color = "darkred") + 
+  geom_line(aes(y = Bitcoin_Open_Price), color="steelblue", linetype="twodash") + 
+    labs(x = "Date",
+         y = "Price",
+         color = "Legend")
+
+```
+## Arfima
+```{r message=FALSE, warning=FALSE, cache=TRUE}
+
+Bitcoin_arfima <- arfima(train$Bitcoin_Open_Price)
+Bitcoin_arfima_forecast <- forecast(Bitcoin_arfima, 30)
+
+plot(Bitcoin_arfima_forecast)
+
+Bitcoin_arfima_smape <- smape(test$Bitcoin_Open_Price,Bitcoin_arfima_forecast$mean)
+
+Bitcoin_arfima_rmse <-
+rmse(test$Bitcoin_Open_Price,Bitcoin_arfima_forecast$mean)
+
+arfima_predict <- data.table::as.data.table(Bitcoin_arfima_forecast$mean, .keep.rownames = "BitcoinArfimaPredict")
+
+arfima_predict$Date <-seq(as.Date("2022/04/01"), by = "day", length.out = 30)
+
+arfima_predictions = merge(test[c(1:2)],arfima_predict, by = 'Date')
+
+ggplot(arfima_predictions , aes(x=Date)) + 
+  geom_line(aes(y = x), color = "darkred") + 
+  geom_line(aes(y = Bitcoin_Open_Price), color="steelblue", linetype="twodash") + 
+    labs(x = "Date",
+         y = "Price",
+         color = "Legend")
+
+```
+## PACF and ACF of Bitcoin
+```{r message=FALSE, warning=FALSE, cache=TRUE}
+
+acf(train$Bitcoin_Open_Price)
+pacf(train$Bitcoin_Open_Price)
+```
+#Bitcoin Price Prediction Using Prophet
+```{r message=FALSE, warning=FALSE, cache=TRUE}
+
+prophet_train <- train[c(1:2)]
+prophet_test <- test[c(1:2)]
+
+colnames(prophet_train)[1]<-"ds"
+colnames(prophet_test)[1]<-"ds"
+colnames(prophet_train)[2]<-"y"
+colnames(prophet_test)[2]<-"y"
+
+ProphetModel <- prophet(prophet_train)
+ProphetFuture30 <- make_future_dataframe(ProphetModel, periods = 30)
+
+tail(ProphetFuture30)
+
+
+Forecast_Prophet <- predict(ProphetModel,ProphetFuture30)
+
+tail(Forecast_Prophet[c('ds','yhat','yhat_lower','yhat_upper')])
+
+dyplot.prophet(ProphetModel,Forecast_Prophet)
+
+prophet_plot_components(ProphetModel,Forecast_Prophet)
+```
+
+#Bitcoin Price Prediction Using Prophet
+```{r message=FALSE, warning=FALSE, cache=TRUE}
+
+ProphetAprilPredict <- tail(Forecast_Prophet$yhat,30)
+
+Bitcoin_prophet_smape <- smape(test$Bitcoin_Open_Price,ProphetAprilPredict)
+
+Bitcoin_prophet_rmse <-
+rmse(test$Bitcoin_Open_Price,ProphetAprilPredict)
+
+prophet_predict <- data.table::as.data.table(ProphetAprilPredict, .keep.rownames = "BitcoinProphetPredict")
+
+prophet_predict$Date <-seq(as.Date("2022/04/01"), by = "day", length.out = 30)
+
+prophet_predictions = merge(test[c(1:2)],prophet_predict, by = 'Date')
+
+
+ggplot(prophet_predictions , aes(x=Date)) + 
+  geom_line(aes(y = ProphetAprilPredict), color = "darkred") + 
+  geom_line(aes(y = Bitcoin_Open_Price), color="steelblue", linetype="twodash") + 
+    labs(x = "Date",
+         y = "Price",
+         color = "Legend")
+
+```
+
+
+#Bitcoin Price Prediction Using SP500 and ARIMA
+```{r message=FALSE, warning=FALSE, cache=TRUE}
+
+acf(train$SPOpenLag)
+
+SP_arfima_forecast <- arfima(train$SPOpenLag)
+SP_April2022 <- forecast(SP_arfima_forecast,30)
+
+#SP_April2022$mean
+#test$SPOpenLag
+
+fit <- auto.arima(train$Bitcoin_Open_Price, xreg = train$SPOpenLag)
+
+Bitcoin_lr_forecast <- forecast(fit, h=30, xreg = SP_April2022$mean)
+
+Bitcoin_xreg_smape <- smape(test$Bitcoin_Open_Price,Bitcoin_lr_forecast$mean)
+
+Bitcoin_xreg_rmse <-
+rmse(test$Bitcoin_Open_Price,Bitcoin_lr_forecast$mean)
+
+linear_predict <- data.table::as.data.table(Bitcoin_lr_forecast$mean, .keep.rownames = "BitcoinLinearPredict")
+
+linear_predict$Date <-seq(as.Date("2022/04/01"), by = "day", length.out = 30)
+
+linear_predictions = merge(test[c(1:2)],linear_predict, by = 'Date')
+
+View(linear_predictions)
+ggplot(linear_predictions , aes(x=Date)) + 
+  geom_line(aes(y = x), color = "darkred") + 
+  geom_line(aes(y = Bitcoin_Open_Price), color="steelblue", linetype="twodash") + 
+    labs(x = "Date",
+         y = "Price",
+         color = "Legend")
+```
